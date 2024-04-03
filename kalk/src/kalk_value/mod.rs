@@ -971,7 +971,7 @@ impl KalkValue {
             ) => {
                 if self.has_imaginary()
                     || imaginary_rhs != &0f64
-                    || (real_rhs > &0f64 && real_rhs < &1f64)
+                    || (real < 0f64 && real_rhs.clone().abs() < 1f64)
                 {
                     let a = real;
                     let b = imaginary;
