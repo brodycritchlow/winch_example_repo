@@ -7,17 +7,19 @@ pub struct CalculationResult {
     value: KalkValue,
     radix: u8,
     is_approximation: bool,
+    equation_variable: Option<String>,
 }
 
 // Wraps around KalkValue since enums don't work
 // with the javascript bindings.
 #[wasm_bindgen]
 impl CalculationResult {
-    pub(crate) fn new(value: KalkValue, radix: u8, is_approximation: bool) -> Self {
+    pub(crate) fn new(value: KalkValue, radix: u8, is_approximation: bool, equation_variable: Option<String>) -> Self {
         CalculationResult {
             value,
             radix,
             is_approximation,
+            equation_variable,
         }
     }
 
@@ -48,10 +50,24 @@ impl CalculationResult {
             )
         };
 
-        if self.is_approximation {
-            format!("≈ {}", value)
+        let decimal_count = if let Some(dot_index) = value.chars().position(|c| c == '.') {
+            let end_index = value.chars().position(|c| c == ' ').unwrap_or(value.len()) - 1;
+
+            if end_index > dot_index { end_index - dot_index } else { 0 }
         } else {
-            value
+            0
+        };
+
+        let equation_variable = if let Some(name) = &self.equation_variable {
+            format!("{} ", name)
+        } else {
+            String::new()
+        };
+
+        if self.is_approximation || decimal_count == 10 {
+            format!("{}≈ {}", equation_variable, value)
+        } else {
+            format!("{}= {}", equation_variable, value)
         }
     }
 
@@ -91,7 +107,7 @@ impl CalculationResult {
 
     #[wasm_bindgen(js_name = estimate)]
     pub fn estimate_js(&self) -> Option<String> {
-        self.value.estimate()
+        self.value.estimate().map(|x| x.value)
     }
 }
 

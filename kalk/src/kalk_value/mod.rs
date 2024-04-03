@@ -2,12 +2,10 @@
 pub mod with_rug;
 
 #[cfg(feature = "rug")]
-use rug::{Float, ops::Pow};
+use rug::{ops::Pow, Float};
 
 #[cfg(not(feature = "rug"))]
 pub mod regular;
-#[cfg(not(feature = "rug"))]
-pub use regular::*;
 
 mod rounding;
 
@@ -16,7 +14,15 @@ use crate::errors::KalkError;
 use crate::radix;
 use wasm_bindgen::prelude::*;
 
+use self::rounding::EstimationResult;
+
 const ACCEPTABLE_COMPARISON_MARGIN: f64 = 0.00000001;
+
+#[cfg(feature = "rug")]
+pub(crate) type KalkFloat = rug::Float;
+
+#[cfg(not(feature = "rug"))]
+pub(crate) type KalkFloat = f64;
 
 #[macro_export]
 #[cfg(not(feature = "rug"))]
@@ -148,7 +154,8 @@ impl ScientificNotation {
             value,
             exponent: exponent - modulo + 1,
             imaginary: self.imaginary,
-        }.to_string()
+        }
+        .to_string()
     }
 }
 
@@ -208,12 +215,21 @@ impl std::fmt::Display for KalkValue {
                 }
             }
             KalkValue::Vector(values) => {
+                let get_estimation: fn(&KalkValue) -> String = |x| {
+                    x.estimate()
+                        .unwrap_or_else(|| EstimationResult {
+                            value: x.to_string(),
+                            is_exact: false,
+                        })
+                        .value
+                };
+
                 write!(
                     f,
                     "({})",
                     values
                         .iter()
-                        .map(|x| x.estimate().unwrap_or_else(|| x.to_string()))
+                        .map(get_estimation)
                         .collect::<Vec<String>>()
                         .join(", ")
                 )
@@ -223,7 +239,13 @@ impl std::fmt::Display for KalkValue {
                 let mut longest = 0;
                 for row in rows {
                     for value in row {
-                        let value_str = value.estimate().unwrap_or_else(|| value.to_string());
+                        let value_str = value
+                            .estimate()
+                            .unwrap_or_else(|| EstimationResult {
+                                value: value.to_string(),
+                                is_exact: false,
+                            })
+                            .value;
                         longest = longest.max(value_str.len());
                         value_strings.push(format!("{},", value_str));
                     }
@@ -396,8 +418,9 @@ impl KalkValue {
         let new_value = KalkValue::Number(new_real, new_imaginary, unit.clone());
 
         if let Some(estimate) = new_value.estimate() {
-            if estimate != output && radix == 10 {
-                output.push_str(&format!(" ≈ {}", estimate));
+            if estimate.value != output && radix == 10 {
+                let equal_sign = if estimate.is_exact { "=" } else { "≈" };
+                output.push_str(&format!(" {equal_sign} {}", estimate.value));
             }
         } else if has_scientific_notation && !is_engineering_mode {
             output.insert_str(0, &format!("{} ≈ ", self));
@@ -420,7 +443,7 @@ impl KalkValue {
     }
 
     /// Get an estimate of what the number is, eg. 3.141592 => π. Does not work properly with scientific notation.
-    pub fn estimate(&self) -> Option<String> {
+    pub fn estimate(&self) -> Option<EstimationResult> {
         let rounded_real = rounding::estimate(self, ComplexNumberType::Real);
         let rounded_imaginary = rounding::estimate(self, ComplexNumberType::Imaginary);
 
@@ -429,20 +452,26 @@ impl KalkValue {
         }
 
         let mut output = String::new();
-        if let Some(value) = rounded_real {
-            output.push_str(&value);
+        let mut real_is_exact = rounded_real.is_none();
+        if let Some(result) = rounded_real {
+            real_is_exact = result.is_exact;
+            output.push_str(&result.value);
         } else if self.has_real() {
             output.push_str(&self.to_string_real(10));
         }
 
-        let imaginary_value = if let Some(value) = rounded_imaginary {
-            Some(value)
+        let mut imaginary_is_exact = rounded_imaginary.is_none();
+        let imaginary_value = if let Some(result) = rounded_imaginary {
+            imaginary_is_exact = result.is_exact;
+
+            Some(result.value)
         } else if self.has_imaginary() {
             Some(self.to_string_imaginary(10, false))
         } else {
             None
         };
 
+        let is_exact = real_is_exact && imaginary_is_exact;
         if let Some(value) = imaginary_value {
             // Clear output if it's just 0.
             if output == "0" {
@@ -453,7 +482,10 @@ impl KalkValue {
                 // If both values ended up being estimated as zero,
                 // return zero.
                 if output.is_empty() {
-                    return Some(String::from("0"));
+                    return Some(EstimationResult {
+                        value: String::from("0"),
+                        is_exact,
+                    });
                 }
             } else {
                 let sign = if value.starts_with('-') { "-" } else { "+" };
@@ -472,7 +504,10 @@ impl KalkValue {
             }
         }
 
-        Some(output)
+        Some(EstimationResult {
+            value: output,
+            is_exact,
+        })
     }
 
     /// Basic up/down rounding from 0.00xxx or 0.999xxx or xx.000xxx, etc.
@@ -547,7 +582,7 @@ impl KalkValue {
         let exponent = value.abs().log10().floor() as i32 + 1;
 
         ScientificNotation {
-            value: value / (10f64.powf(exponent as f64 - 1f64) as f64),
+            value: value / (10f64.powf(exponent as f64 - 1f64)),
             // I... am not sure what else to do...
             exponent,
             imaginary: complex_number_type == ComplexNumberType::Imaginary,
@@ -936,7 +971,7 @@ impl KalkValue {
             ) => {
                 if self.has_imaginary()
                     || imaginary_rhs != &0f64
-                    || (real < 0f64 && real_rhs < &1f64)
+                    || (real_rhs > &0f64 && real_rhs < &1f64)
                 {
                     let a = real;
                     let b = imaginary;
@@ -1155,6 +1190,10 @@ pub fn format_number(input: f64) -> String {
 
 #[cfg(feature = "rug")]
 pub fn format_number_big(input: &Float) -> String {
+    if input.clone().log10() < 0f64 {
+        return input.to_f64().to_string();
+    }
+
     let input_str = input.to_string();
     let mut result = if input_str.contains('.') {
         input_str
@@ -1562,6 +1601,7 @@ mod tests {
     fn test_to_string_pretty() {
         let in_out = vec![
             (float!(0.99999), float!(0.0), "0.99999 ≈ 1"),
+            (float!(0.00000001), float!(0.0), "0.00000001 ≈ 10^-8"),
             (float!(-0.99999), float!(0.0), "-0.99999 ≈ -1"),
             (float!(0.0), float!(0.99999), "0.99999i ≈ i"),
             (float!(0.000000001), float!(0.0), "10^-9 ≈ 0"),
@@ -1601,7 +1641,8 @@ mod tests {
             (float!(3.00000000004), float!(0.0), "3"),
         ];
         for (real, imaginary, output) in in_out {
-            let result = KalkValue::Number(real, imaginary, None).to_string_pretty(ScientificNotationFormat::Normal);
+            let result = KalkValue::Number(real, imaginary, None)
+                .to_string_pretty(ScientificNotationFormat::Normal);
             assert_eq!(output, result);
         }
     }
@@ -1624,7 +1665,10 @@ mod tests {
                 imaginary: false,
             };
 
-            assert_eq!(sci.to_string_format(ScientificNotationFormat::Engineering), output);
+            assert_eq!(
+                sci.to_string_format(ScientificNotationFormat::Engineering),
+                output
+            );
         }
     }
 }
