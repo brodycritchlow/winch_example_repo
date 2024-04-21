@@ -1,0 +1,11 @@
+package
+  remote = "https://github.com/brodycritchlow/winch_example_repo"
+
+local
+  home = "~/winch/winch"
+
+install 
+  "cd ./cli"
+  "cargo build --release"
+  "cd ../target/release"
+  "winch IF(os == "WIN") then $env:PATH += ";./kalker.exe" else export PATH=$PATH:./kalker"
